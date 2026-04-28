@@ -1,4 +1,4 @@
-"""Core laughter detection functionality."""
+"""Core laughter detection functionality using YAMNet."""
 
 import json
 import os
@@ -7,9 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import librosa
 import numpy as np
-from moviepy.editor import VideoFileClip
+import resampy
+import tensorflow as tf
+import tensorflow_hub as hub
+from moviepy import VideoFileClip
+from scipy.io import wavfile
 
 
 @dataclass
@@ -28,29 +31,43 @@ class LaughterSegment:
         }
 
 
+# YAMNet class indices for laughter-related sounds
+# From yamnet_class_map.csv
+LAUGHTER_CLASS_IDS = [
+    17,   # Laughter
+    18,   # Baby laughter
+    19,   # Giggle
+    20,   # Snicker
+    21,   # Belly laugh
+    22,   # Chuckle, chortle
+]
+
+
 class LaughterDetector:
-    """Detects laughter in audio/video files using acoustic feature analysis."""
+    """Detects laughter in audio/video files using YAMNet neural network."""
 
     def __init__(
         self,
-        threshold: float = 0.5,
+        threshold: float = 0.3,
         min_duration: float = 0.3,
-        hop_length: int = 512,
-        frame_length: int = 2048,
     ):
         """
-        Initialize the laughter detector.
+        Initialize the laughter detector with YAMNet model.
 
         Args:
             threshold: Minimum score to consider as laughter (0-1)
             min_duration: Minimum duration in seconds for a laughter segment
-            hop_length: Hop length for audio analysis
-            frame_length: Frame length for audio analysis
         """
         self.threshold = threshold
         self.min_duration = min_duration
-        self.hop_length = hop_length
-        self.frame_length = frame_length
+        self._model = None
+
+    @property
+    def model(self):
+        """Lazy-load the YAMNet model."""
+        if self._model is None:
+            self._model = hub.load('https://tfhub.dev/google/yamnet/1')
+        return self._model
 
     def extract_audio_from_video(self, video_path: str, output_path: Optional[str] = None) -> str:
         """
@@ -67,83 +84,47 @@ class LaughterDetector:
             output_path = tempfile.mktemp(suffix=".wav")
 
         video = VideoFileClip(video_path)
-        video.audio.write_audiofile(output_path, verbose=False, logger=None)
+        video.audio.write_audiofile(output_path, logger=None)
         video.close()
 
         return output_path
 
-    def compute_laughter_features(self, y: np.ndarray, sr: int) -> np.ndarray:
+    def load_audio(self, audio_path: str) -> tuple[np.ndarray, int]:
         """
-        Compute acoustic features indicative of laughter.
-
-        Laughter typically has:
-        - High spectral flux (rapid changes)
-        - Irregular rhythm patterns
-        - Specific frequency characteristics
-        - High zero-crossing rate variations
+        Load audio file and convert to mono 16kHz as required by YAMNet.
 
         Args:
-            y: Audio time series
-            sr: Sample rate
+            audio_path: Path to the audio file
 
         Returns:
-            Frame-level laughter scores
+            Tuple of (waveform as float32, sample_rate)
         """
-        # Compute various features
-        # Spectral centroid - laughter tends to have higher frequencies
-        spectral_centroid = librosa.feature.spectral_centroid(
-            y=y, sr=sr, hop_length=self.hop_length
-        )[0]
+        sample_rate, wav_data = wavfile.read(audio_path)
 
-        # Spectral flux - laughter has rapid spectral changes
-        onset_env = librosa.onset.onset_strength(
-            y=y, sr=sr, hop_length=self.hop_length
-        )
+        # Convert to mono if stereo
+        if len(wav_data.shape) > 1:
+            wav_data = np.mean(wav_data, axis=1)
 
-        # Zero crossing rate - indicates noisiness/breathiness
-        zcr = librosa.feature.zero_crossing_rate(
-            y, hop_length=self.hop_length
-        )[0]
+        # Convert to float32 in [-1, 1] range
+        if wav_data.dtype == np.int16:
+            wav_data = wav_data.astype(np.float32) / 32768.0
+        elif wav_data.dtype == np.int32:
+            wav_data = wav_data.astype(np.float32) / 2147483648.0
+        elif wav_data.dtype == np.uint8:
+            wav_data = (wav_data.astype(np.float32) - 128) / 128.0
+        else:
+            wav_data = wav_data.astype(np.float32)
 
-        # RMS energy - laughter has characteristic energy patterns
-        rms = librosa.feature.rms(
-            y=y, hop_length=self.hop_length
-        )[0]
+        # Resample to 16kHz if needed (YAMNet requirement)
+        if sample_rate != 16000:
+            wav_data = resampy.resample(wav_data, sample_rate, 16000)
+            sample_rate = 16000
 
-        # MFCC variance - laughter has high timbral variation
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, hop_length=self.hop_length)
-        mfcc_var = np.var(mfccs, axis=0)
-
-        # Normalize features to 0-1 range
-        def normalize(x):
-            if x.max() - x.min() == 0:
-                return np.zeros_like(x)
-            return (x - x.min()) / (x.max() - x.min())
-
-        # Ensure all features have the same length
-        min_len = min(len(spectral_centroid), len(onset_env), len(zcr), len(rms), len(mfcc_var))
-
-        spectral_centroid = normalize(spectral_centroid[:min_len])
-        onset_env = normalize(onset_env[:min_len])
-        zcr = normalize(zcr[:min_len])
-        rms = normalize(rms[:min_len])
-        mfcc_var = normalize(mfcc_var[:min_len])
-
-        # Combine features with weights tuned for laughter detection
-        # These weights emphasize features most characteristic of laughter
-        laughter_score = (
-            0.25 * onset_env +      # Rapid bursts
-            0.20 * zcr +            # Breathiness
-            0.20 * mfcc_var +       # Timbral variation
-            0.20 * spectral_centroid +  # Higher frequencies
-            0.15 * rms              # Energy
-        )
-
-        return laughter_score
+        return wav_data, sample_rate
 
     def detect(self, audio_path: str) -> list[LaughterSegment]:
         """
-        Detect laughter segments in an audio file.
+        Detect laughter segments in an audio file using YAMNet.
 
         Args:
             audio_path: Path to the audio file
@@ -151,26 +132,30 @@ class LaughterDetector:
         Returns:
             List of detected laughter segments
         """
-        # Load audio
-        y, sr = librosa.load(audio_path, sr=22050)
+        # Load and preprocess audio
+        waveform, sample_rate = self.load_audio(audio_path)
 
-        # Compute laughter scores
-        scores = self.compute_laughter_features(y, sr)
+        # Run YAMNet inference
+        scores, embeddings, spectrogram = self.model(waveform)
+        scores = scores.numpy()
 
-        # Convert frame indices to time
-        times = librosa.frames_to_time(
-            np.arange(len(scores)),
-            sr=sr,
-            hop_length=self.hop_length
-        )
+        # YAMNet outputs scores every 0.48 seconds (with 0.96s window, 50% overlap)
+        frame_duration = 0.48
+
+        # Extract laughter scores (sum of all laughter-related classes)
+        laughter_scores = np.zeros(len(scores))
+        for class_id in LAUGHTER_CLASS_IDS:
+            laughter_scores += scores[:, class_id]
 
         # Find segments above threshold
         segments = []
         in_segment = False
-        segment_start = 0
+        segment_start = 0.0
         segment_scores = []
 
-        for i, (time, score) in enumerate(zip(times, scores)):
+        for i, score in enumerate(laughter_scores):
+            time = i * frame_duration
+
             if score >= self.threshold:
                 if not in_segment:
                     in_segment = True
@@ -180,7 +165,7 @@ class LaughterDetector:
                     segment_scores.append(score)
             else:
                 if in_segment:
-                    segment_end = times[i - 1] if i > 0 else time
+                    segment_end = time
                     duration = segment_end - segment_start
 
                     if duration >= self.min_duration:
@@ -196,7 +181,7 @@ class LaughterDetector:
 
         # Handle segment at end of file
         if in_segment:
-            segment_end = times[-1]
+            segment_end = len(laughter_scores) * frame_duration
             duration = segment_end - segment_start
 
             if duration >= self.min_duration:
@@ -240,7 +225,8 @@ class LaughterDetector:
                 "segments": [seg.to_dict() for seg in segments],
                 "settings": {
                     "threshold": self.threshold,
-                    "min_duration": self.min_duration
+                    "min_duration": self.min_duration,
+                    "model": "YAMNet"
                 }
             }
 
@@ -260,7 +246,7 @@ class LaughterDetector:
 def detect_laughter(
     video_path: str,
     output_path: Optional[str] = None,
-    threshold: float = 0.5,
+    threshold: float = 0.3,
     min_duration: float = 0.3
 ) -> dict:
     """

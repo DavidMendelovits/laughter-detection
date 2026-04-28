@@ -32,6 +32,23 @@ laughter-detect video.mp4 --threshold 0.6 --min-duration 0.5
 
 # Print JSON to stdout
 laughter-detect video.mp4 --print-json
+
+# Launch a local web player that overlays detected laughter on the timeline
+laughter-detect video.mp4 --player
+```
+
+### Web Player
+
+`--player` starts a small local HTTP server (no external dependencies) that
+serves the source video plus a single-page UI. Detected laughter segments are
+rendered as markers along a custom timeline; click a marker (or row in the
+list) to jump to it, or use the *Prev / Next laugh* buttons. Keyboard:
+<kbd>n</kbd> next, <kbd>p</kbd> previous, <kbd>space</kbd> play/pause.
+
+```bash
+laughter-detect video.mp4 --player                       # default port 8000
+laughter-detect video.mp4 --player --player-port 9000    # custom port
+laughter-detect video.mp4 --player --no-open             # don't auto-open browser
 ```
 
 ### Python API
@@ -86,22 +103,22 @@ The JSON output contains:
 
 ## How It Works
 
-The detector analyzes audio using acoustic features characteristic of laughter:
-
-- **Spectral flux**: Laughter has rapid spectral changes
-- **Zero-crossing rate**: Indicates breathiness/noisiness
-- **MFCC variance**: Laughter has high timbral variation
-- **Spectral centroid**: Laughter tends toward higher frequencies
-- **RMS energy**: Characteristic energy patterns
-
-These features are combined with empirically-tuned weights to produce a frame-level laughter score.
+The detector runs Google's [YAMNet](https://tfhub.dev/google/yamnet/1) audio
+classifier (trained on AudioSet) over the extracted mono 16 kHz audio. YAMNet
+emits scores every 0.48 s across 521 classes; we sum the six laughter-related
+classes (Laughter, Baby laughter, Giggle, Snicker, Belly laugh, Chuckle/chortle)
+and threshold the resulting score to produce frame-level segments. Adjacent
+frames above the threshold are merged and any segment shorter than
+`--min-duration` is dropped.
 
 ## Requirements
 
 - Python 3.9+
-- librosa
 - moviepy
 - numpy
+- tensorflow / tensorflow-hub
+- resampy
+- scipy
 
 ## License
 

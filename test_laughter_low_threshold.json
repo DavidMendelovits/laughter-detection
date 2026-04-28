@@ -1,0 +1,22 @@
+{
+  "source_file": "/Users/davidmendelovits/space/laughter-detection/.conductor/santa-fe-v1/test.mov",
+  "total_segments": 2,
+  "segments": [
+    {
+      "start_time": 3.274,
+      "end_time": 3.599,
+      "duration": 0.325,
+      "score": 0.3653
+    },
+    {
+      "start_time": 281.333,
+      "end_time": 281.751,
+      "duration": 0.418,
+      "score": 0.3968
+    }
+  ],
+  "settings": {
+    "threshold": 0.3,
+    "min_duration": 0.3
+  }
+}
