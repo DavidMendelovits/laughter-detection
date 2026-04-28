@@ -17,6 +17,7 @@ Examples:
   %(prog)s video.mp4
   %(prog)s video.mp4 -o results.json
   %(prog)s video.mp4 --threshold 0.6 --min-duration 0.5
+  %(prog)s video.mp4 --player
         """
     )
 
@@ -54,6 +55,25 @@ Examples:
         "--print-json",
         action="store_true",
         help="Print JSON results to stdout"
+    )
+
+    parser.add_argument(
+        "--player",
+        action="store_true",
+        help="After detection, launch a local web player that shows laughter markers on the video timeline"
+    )
+
+    parser.add_argument(
+        "--player-port",
+        type=int,
+        default=8000,
+        help="Preferred port for --player (falls back to a random free port if taken; default: 8000)"
+    )
+
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="With --player, do not auto-open the system browser"
     )
 
     args = parser.parse_args()
@@ -96,6 +116,15 @@ Examples:
 
         if args.print_json:
             print(json.dumps(results, indent=2))
+
+        if args.player:
+            from .player import serve_player
+            serve_player(
+                video_path=str(input_path),
+                results=results,
+                port=args.player_port,
+                open_browser=not args.no_open,
+            )
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
